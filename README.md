@@ -1,7 +1,7 @@
 
 # MixMamba-Fewshot: Mamba and Attention Mixer-based Method with Few-Shot Learning for Bearing Fault Diagnosis
 
-This is our implemented source code for the paper "[MixMamba-Fewshot: Mamba and Attention Mixer-based Method with Few-Shot Learning for Bearing Fault Diagnosis](https://doi.org/10.1016/j.compeleceng.2024.110004)" published in the Journal of Applied Intelligence
+This is our implemented source code for the paper "[MixMamba-Fewshot: Mamba and Attention Mixer-based Method with Few-Shot Learning for Bearing Fault Diagnosis](https://doi.org/10.1007/s10489-025-06361-0) published in the Journal of Applied Intelligence
 ## Methodology
 ![plot](images/model_revise.png)
 
@@ -61,7 +61,7 @@ bash test.sh 5
 ```
 
 ## Contact
-Please feel free to contact me via email linh.tn212860@sis.hust.edu.vn if you need anything related to this repo!
+Please feel free to contact me via email linh.tn212860@sis.hust.edu.vn or linhthan1512@gmail.com if you need anything related to this repo!
 ## Citation
 If you feel this code is useful, please give us 1 ⭐ and cite our paper.
 ```bash
