@@ -65,7 +65,16 @@ Please feel free to contact me via email linh.tn212860@sis.hust.edu.vn or linhth
 ## Citation
 If you feel this code is useful, please give us 1 ⭐ and cite our paper.
 ```bash
-
+@article{than2025mixmamba,
+  title={Mixmamba-fewshot: mamba and attention mixer-based method with few-shot learning for bearing fault diagnosis},
+  author={Than, Nhu-Linh and Nguyen, Van Quang and Truong, Gia-Bao and Pham, Van-Truong and Tran, Thi-Thao},
+  journal={Applied Intelligence},
+  volume={55},
+  number={6},
+  pages={1--22},
+  year={2025},
+  publisher={Springer}
+}
 
 ```
 
