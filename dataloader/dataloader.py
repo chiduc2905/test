@@ -1,56 +1,88 @@
+"""Episodic sampler for N-way K-shot few-shot learning."""
 import torch
-from torch.utils.data import Dataset, DataLoader
-import torch.nn as nn
+from torch.utils.data import Dataset
+
 
 class FewshotDataset(Dataset):
-    def __init__(self, train_data, train_label, episode_num=1000, way_num=7, shot_num=1, query_num=1):
-        self.train_data = train_data
-        self.train_label = train_label
+    """
+    N-way K-shot episode generator.
+    
+    Each episode contains:
+    - Support set: way_num classes × shot_num samples
+    - Query set: way_num classes × query_num samples
+    
+    Labels are episode-relative: 0, 1, ..., way_num-1
+    """
+    
+    def __init__(self, data, labels, episode_num, way_num, shot_num, query_num, seed=None):
+        """
+        Args:
+            data: Tensor (N, C, H, W)
+            labels: Tensor (N,) with class labels 0..way_num-1
+            episode_num: Number of episodes
+            way_num: Classes per episode
+            shot_num: Support samples per class
+            query_num: Query samples per class
+            seed: Random seed for reproducibility
+        """
+        self.data = data
+        self.labels = labels
         self.episode_num = episode_num
         self.way_num = way_num
         self.shot_num = shot_num
         self.query_num = query_num
+        self.seed = seed if seed is not None else 0
+        
+        # Pre-compute indices for each class
+        self.class_indices = {}
+        for c in range(way_num):
+            self.class_indices[c] = (labels == c).nonzero(as_tuple=True)[0]
+        
+        # Validate data availability
+        self._validate()
+    
+    def _validate(self):
+        """Check if enough samples exist for requested shot/query."""
+        required = self.shot_num + self.query_num
+        for c in range(self.way_num):
+            available = len(self.class_indices[c])
+            if available < required:
+                print(f"Warning: Class {c} has {available} samples, need {required}")
 
     def __len__(self):
         return self.episode_num
 
     def __getitem__(self, index):
-        query_images = []
-        query_targets = []
-        support_images = []
-        support_targets = []
-
-        label_indices = torch.randperm(len(self.train_label)).cuda()
-        train_label_gpu = self.train_label.cuda()
-        train_data_gpu = self.train_data.cuda()
-
-        for label_num in range(self.way_num):
-            support_idxs = torch.nonzero(train_label_gpu[label_indices] == label_num, as_tuple=False).flatten()
-            support_idxs = support_idxs[:self.shot_num]
-            support_data = train_data_gpu[label_indices][support_idxs]
-
-            query_idxs = torch.nonzero(train_label_gpu[label_indices] == label_num, as_tuple=False).flatten()
-            query_idxs = query_idxs[~torch.isin(query_idxs, support_idxs)][:self.query_num]
-            query_data = train_data_gpu[label_indices][query_idxs]
-            query_data_targets = train_label_gpu[label_indices][query_idxs]
-
-            query_images.append(query_data)
-            query_targets.append(query_data_targets)
-            support_images.append(support_data)
-            support_targets.append(torch.full((self.shot_num,), label_num).cuda())
-
-        query_images = torch.cat(query_images, dim=0)
-        query_targets = torch.cat(query_targets, dim=0)
-        support_images = torch.cat(support_images, dim=0)
-        support_targets = torch.cat(support_targets, dim=0)
-
-        return query_images, query_targets, support_images, support_targets
-
-
-
-'''
-  way_num = num_classes, shot_num = number samples per class
-
-'''
-
-
+        """
+        Generate one episode.
+        
+        Returns:
+            query_images: (way_num * query_num, C, H, W)
+            query_targets: (way_num * query_num,) with labels 0..way_num-1
+            support_images: (way_num * shot_num, C, H, W)
+            support_targets: (way_num * shot_num,) with labels 0..way_num-1
+        """
+        gen = torch.Generator()
+        gen.manual_seed(self.seed * 10000 + index)
+        
+        support_images, support_targets = [], []
+        query_images, query_targets = [], []
+        
+        for class_id in range(self.way_num):
+            indices = self.class_indices[class_id]
+            perm = torch.randperm(len(indices), generator=gen)
+            shuffled = indices[perm]
+            
+            # Split into support and query
+            s_idx = shuffled[:self.shot_num]
+            q_idx = shuffled[self.shot_num:self.shot_num + self.query_num]
+            
+            support_images.append(self.data[s_idx])
+            query_images.append(self.data[q_idx])
+            
+            # Episode-relative labels
+            support_targets.append(torch.full((len(s_idx),), class_id, dtype=torch.long))
+            query_targets.append(torch.full((len(q_idx),), class_id, dtype=torch.long))
+        
+        return (torch.cat(query_images), torch.cat(query_targets),
+                torch.cat(support_images), torch.cat(support_targets))
