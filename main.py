@@ -136,30 +136,30 @@ def train_loop(net, train_loader, val_X, val_y, args):
             support = support.to(device)
             targets = q_labels.view(-1).to(device)
             
-            # Process each query sample
+            # Process each episode in the batch
             loss_batch = 0.0
             for b in range(B):
-                q_batch = query[b]  # (way*query, C, H, W)
-                s_batch = support[b]  # (way*shot, C, H, W)
+                q_in = query[b]  # (way*query, C, H, W)
+                s_in = support[b]  # (way*shot, C, H, W)
                 
-                # Convert support to list format for CovarianceNet
-                # Group by class: support_list[class_id] = (shot, C, H, W)
-                support_list = []
-                for class_id in range(args.way_num):
-                    start_idx = class_id * args.shot_num
-                    end_idx = start_idx + args.shot_num
-                    support_list.append(s_batch[start_idx:end_idx])
+                # Reshape support to (Way, Shot, C, H, W)
+                K = args.way_num
+                Shot = args.shot_num
+                C, H, W = s_in.shape[1], s_in.shape[2], s_in.shape[3]
+                s_reshaped = s_in.view(K, Shot, C, H, W)
                 
-                # Forward pass for each query
-                for i, q_sample in enumerate(q_batch):
-                    q_in = q_sample.unsqueeze(0)  # (1, C, H, W)
-                    scores = net(q_in, support_list)  # (1, way_num)
-                    target_i = targets[b * len(q_batch) + i:b * len(q_batch) + i + 1]
-                    
-                    loss = criterion_main(scores, target_i)
-                    loss_batch += loss
+                # Get targets for this episode
+                # q_in.shape[0] is num_queries per episode
+                num_q = q_in.shape[0]
+                target_in = targets[b * num_q : (b + 1) * num_q]
+                
+                # Forward pass - processes all queries in parallel against support set
+                scores = net(q_in, s_reshaped)  # (N_queries, Way)
+                
+                loss = criterion_main(scores, target_in)
+                loss_batch += loss
             
-            loss_batch = loss_batch / (B * query.shape[1])
+            loss_batch = loss_batch / B
             loss_batch.backward()
             optimizer.step()
             
@@ -243,29 +243,27 @@ def evaluate(net, loader, args, criterion_main=None):
             targets = q_labels.view(-1).to(device)
             
             for b in range(B):
-                q_batch = query[b]
-                s_batch = support[b]
+                q_in = query[b]
+                s_in = support[b]
                 
-                # Convert support to list format
-                support_list = []
-                for class_id in range(args.way_num):
-                    start_idx = class_id * shot_num
-                    end_idx = start_idx + shot_num
-                    support_list.append(s_batch[start_idx:end_idx])
+                K = args.way_num
+                C, H, W = s_in.shape[1], s_in.shape[2], s_in.shape[3]
+                s_reshaped = s_in.view(K, shot_num, C, H, W)
                 
-                for i, q_sample in enumerate(q_batch):
-                    q_in = q_sample.unsqueeze(0)
-                    scores = net(q_in, support_list)
-                    pred = scores.argmax(dim=1)
-                    target_i = targets[b * len(q_batch) + i]
-                    
-                    correct += (pred.item() == target_i.item())
-                    total += 1
-                    
-                    if criterion_main is not None:
-                        loss = criterion_main(scores, target_i.unsqueeze(0))
-                        total_loss += loss.item()
-                        num_batches += 1
+                # Forward batched
+                scores = net(q_in, s_reshaped)
+                pred = scores.argmax(dim=1)
+                
+                num_q = q_in.shape[0]
+                target_in = targets[b * num_q : (b + 1) * num_q]
+                
+                correct += (pred == target_in).sum().item()
+                total += num_q
+                
+                if criterion_main is not None:
+                    loss = criterion_main(scores, target_in)
+                    total_loss += loss.item()
+                    num_batches += 1
     
     acc = correct / total if total > 0 else 0
     avg_loss = total_loss / num_batches if num_batches > 0 else None
@@ -318,27 +316,30 @@ def test_final(net, loader, args):
             episode_targets = []
             
             for b in range(B):
-                q_batch = query[b]
-                s_batch = support[b]
+                q_in = query[b]
+                s_in = support[b]
                 
-                support_list = []
-                for class_id in range(args.way_num):
-                    start_idx = class_id * args.shot_num
-                    end_idx = start_idx + args.shot_num
-                    support_list.append(s_batch[start_idx:end_idx])
+                K = args.way_num
+                Shot = args.shot_num
+                C, H, W = s_in.shape[1], s_in.shape[2], s_in.shape[3]
+                s_reshaped = s_in.view(K, Shot, C, H, W)
                 
-                for i, q_sample in enumerate(q_batch):
-                    q_in = q_sample.unsqueeze(0)
-                    scores = net(q_in, support_list)
-                    pred = scores.argmax(dim=1)
-                    target_i = targets[b * len(q_batch) + i]
-                    
-                    episode_preds.append(pred.item())
-                    episode_targets.append(target_i.item())
-                    
-                    # Extract features for t-SNE
-                    feat = net.features(q_in)
-                    all_features.append(feat.view(-1).cpu().numpy())
+                # Batched Forward
+                scores = net(q_in, s_reshaped)
+                pred = scores.argmax(dim=1)
+                
+                num_q = q_in.shape[0]
+                target_in = targets[b * num_q : (b + 1) * num_q]
+                
+                episode_preds.extend(pred.cpu().numpy().tolist())
+                episode_targets.extend(target_in.cpu().numpy().tolist())
+                
+                # Extract features for t-SNE
+                # Use GAP to get vector
+                with torch.no_grad():
+                    feat = net.features(q_in) # (N, dim, h, w)
+                    feat_vec = F.adaptive_avg_pool2d(feat, (1, 1)).view(feat.size(0), -1)
+                    all_features.append(feat_vec.cpu().numpy())
             
             end_time = time.perf_counter()
             episode_time_ms = (end_time - start_time) * 1000

@@ -623,78 +623,123 @@ class CovaBlock(nn.Module):
     def __init__(self):
         super(CovaBlock, self).__init__()
 
-    def cal_covariance(self, input):
-        CovaMatrix_list = []
-        for i in range(len(input)):
-            support_set_sam = input[i]
-            B, C, h, w = support_set_sam.size()
+    def cal_covariance(self, support_features):
+        """
+        Args:
+            support_features: (K, Shot, C, h, w)
+        Returns:
+            covariance_matrices: (K, C, C)
+        """
+        K, Shot, C, h, w = support_features.size()
+        
+        # Reshape to (K, C, N) where N = Shot*h*w
+        support_flat = support_features.permute(0, 2, 1, 3, 4).contiguous().view(K, C, -1)
+        
+        # Mean centering
+        mean_support = torch.mean(support_flat, dim=2, keepdim=True)
+        support_centered = support_flat - mean_support
+        
+        # Compute covariance: (K, C, N) @ (K, N, C) -> (K, C, C)
+        covariance_matrix = torch.bmm(support_centered, support_centered.transpose(1, 2))
+        
+        # Normalize
+        covariance_matrix = torch.div(covariance_matrix, Shot * h * w - 1)
+        return covariance_matrix
 
-            support_set_sam = support_set_sam.permute(1, 0, 2, 3)
-            support_set_sam = support_set_sam.contiguous().view(C, -1)
-            mean_support = torch.mean(support_set_sam, 1, True)
-            support_set_sam = support_set_sam - mean_support
+    def cal_similarity(self, query_features, covariance_matrices):
+        """
+        Args:
+            query_features: (B, C, h, w)
+            covariance_matrices: (K, C, C)
+        Returns:
+            similarity: (B, K*h*w) -> Flattened similarity map for classifier
+        """
+        B, C, h, w = query_features.size()
+        K = covariance_matrices.size(0)
+        
+        # Reshape query: (B, C, L) where L = h*w
+        query_flat = query_features.view(B, C, -1)
+        
+        # Normalize query (B, C, L)
+        query_norm = torch.norm(query_flat, p=2, dim=1, keepdim=True) # (B, 1, L)
+        query_normalized = query_flat / (query_norm + 1e-8)
+        
+        # Compute Mahalanobis-like distance: q.T @ M @ q
+        # Equation: sum_{c,d} q_{n,c,l} * M_{k,c,d} * q_{n,d,l} -> S_{n,k,l}
+        # Inputs:
+        #   query_normalized (Q): (B, C, L)
+        #   covariance_matrices (M): (K, C, C)
+        
+        # We need output (B, K, L)
+        # Using einsum: 'bcl, kcd, bdl -> bkl'
+        similarity_map = torch.einsum('bcl, kcd, bdl -> bkl', query_normalized, covariance_matrices, query_normalized)
+        
+        # Flatten to (B, K*h*w) to match original output format for classifier
+        # Original: mea_sim[0, j*h*w:(j+1)*h*w]
+        # So we want (B, K*L)
+        similarity_flat = similarity_map.view(B, -1)
+        
+        return similarity_flat
 
-            covariance_matrix = support_set_sam @ torch.transpose(support_set_sam, 0, 1)
-            covariance_matrix = torch.div(covariance_matrix, h * w * B - 1)
-            CovaMatrix_list.append(covariance_matrix)
-        return CovaMatrix_list
-
-    def cal_similarity(self, input, CovaMatrix_list):
-        B, C, h, w = input.size()
-        Cova_Sim = []
-
-        for i in range(B):
-            query_sam = input[i]
-            query_sam = query_sam.view(C, -1)
-            query_sam_norm = torch.norm(query_sam, 2, 1, True)
-            query_sam = query_sam / query_sam_norm
-
-            if torch.cuda.is_available():
-                mea_sim = torch.zeros(1, len(CovaMatrix_list) * h * w).cuda()
-            else:
-                mea_sim = torch.zeros(1, len(CovaMatrix_list) * h * w)
-            for j in range(len(CovaMatrix_list)):
-                temp_dis = torch.transpose(query_sam, 0, 1) @ CovaMatrix_list[j] @ query_sam
-                mea_sim[0, j * h * w:(j + 1) * h * w] = temp_dis.diag()
-
-            Cova_Sim.append(mea_sim.view(1, -1))
-
-        Cova_Sim = torch.cat(Cova_Sim, 0)
-
-        return Cova_Sim
-
-    def forward(self, x1, x2):
-        CovaMatrix_list = self.cal_covariance(x2)
-        Cova_Sim = self.cal_similarity(x1, CovaMatrix_list)
-
-        return Cova_Sim
+    def forward(self, q_feat, s_feat):
+        """
+        Args:
+            q_feat: (B, C, h, w)
+            s_feat: (K, Shot, C, h, w)
+        """
+        covariance_matrices = self.cal_covariance(s_feat)
+        similarity = self.cal_similarity(q_feat, covariance_matrices)
+        return similarity
 import functools
 class CovarianceNet(nn.Module):
-  def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=10):
-    super(CovarianceNet, self).__init__()
+    def __init__(self, norm_layer=nn.BatchNorm2d, num_classes=10):
+        super(CovarianceNet, self).__init__()
 
-    if type(norm_layer) == functools.partial:
-      use_bias = norm_layer.func == nn.InstanceNorm2d
-    else:
-      use_bias = norm_layer == nn.InstanceNorm2d
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
 
-      self.features = PamMamba()
-      self.covariance = CovaBlock()
+        self.features = PamMamba()
+        self.covariance = CovaBlock()
 
-      self.classifier = nn.Sequential(
-          nn.LeakyReLU(0.2, True),
-          nn.Dropout(),
-          nn.Conv1d(1,1, kernel_size=256, stride=256, bias=use_bias),
-      )
-  def forward(self,input1, input2):
+        self.classifier = nn.Sequential(
+            nn.LeakyReLU(0.2, True),
+            nn.Dropout(),
+            nn.Conv1d(1, 1, kernel_size=256, stride=256, bias=use_bias),
+        )
 
-      #extract features of input1--query image
-      q = self.features(input1)
-      #extract features of input2--support image
-      S = []
-      for i in range(len(input2)):
-        S.append(self.features(input2[i]))
-      x = self.covariance(q, S)
-      x = self.classifier(x.view(x.size(0),1,-1))
-      x = x.squeeze(1)
-      return x
+    def forward(self, query_images, support_images):
+        """
+        Args:
+            query_images: (B, C, H, W)
+            support_images: (K, Shot, C, H, W) OR list of K tensors each (Shot, C, H, W)
+        """
+        # Handle list input for backward compatibility or ease of use
+        if isinstance(support_images, list):
+            support_images = torch.stack(support_images) # (K, Shot, C, H, W)
+            
+        K, Shot, C, H, W = support_images.shape
+        B = query_images.shape[0]
+        
+        # Extract features for query: (B, C, H, W) -> (B, dim, h, w)
+        q_feat = self.features(query_images)
+        
+        # Extract features for support: (K, Shot, C, H, W) -> (K*Shot, C, H, W) -> (K*Shot, dim, h, w)
+        s_flat = support_images.view(K * Shot, C, H, W)
+        s_feat_flat = self.features(s_flat)
+        
+        # Reshape support features: (K, Shot, dim, h, w)
+        _, dim, h, w = s_feat_flat.shape
+        s_feat = s_feat_flat.view(K, Shot, dim, h, w)
+        
+        # Compute similarity
+        x = self.covariance(q_feat, s_feat) # (B, K*h*w)
+        
+        # Classifier
+        # Input to classifier: (B, 1, K*h*w)
+        x = x.view(B, 1, -1)
+        x = self.classifier(x) # (B, 1, K)
+        x = x.squeeze(1) # (B, K)
+        
+        return x
