@@ -677,7 +677,7 @@ class CovaBlock(nn.Module):
         # Flatten to (B, K*h*w) to match original output format for classifier
         # Original: mea_sim[0, j*h*w:(j+1)*h*w]
         # So we want (B, K*L)
-        similarity_flat = similarity_map.view(B, -1)
+        similarity_flat = similarity_map.reshape(B, -1)
         
         return similarity_flat
 
