@@ -21,6 +21,8 @@ try:
 except:
     pass
 
+from .pca_psa import PCA, PSA
+
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 def flops_selective_scan_ref(B=1, L=256, D=768, N=16, with_D=True, with_Z=False, with_Group=True, with_complex=False):
     """
